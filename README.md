@@ -1,2 +1,2 @@
 # jakel-src
-custom built terminal for personal preferences
+custom built text editor for personal preferences
