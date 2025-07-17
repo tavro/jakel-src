@@ -55,9 +55,41 @@ void enterRawMode() {
 	atexit(exitRawMode);
 
 	struct termios rt = C.ot;
+
+	// Input flags
+	// -----------
+	// IXON: Disables software flow control (CTRL-S/CTRL-Q).
+	//       We turn this off to prevent the terminal from pausing/resuming input.
+	// ICRNL: Disables automatic conversion of carriage return ('\r') to newline ('\n').
+	//        This ensures CTRL-M and ENTER are treated the same.
+	// BRKINT: Disables generation of SIGINT on a break condition.
+	//         We don't want the program to be interrupted this way.
+	// INPCK: Disables parity checking (not needed for most modern systems).
+	// ISTRIP: Disables stripping of the 8th bit of input bytes.
+	//         We want to preserve all 8 bits.
 	rt.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+
+	// Output flags
+	// ------------
+	// OPOST: Disables output processing (e.g., converting '\n' to '\r\n').
+	//        In raw mode, we want to output data exactly as-is.
 	rt.c_oflag &= ~(OPOST);
+
+	// Control flags
+	// -------------
+	// CS8: Sets character size to 8 bits per byte.
+	//      This is a bit mask, not a flag to disable.
 	rt.c_cflag |= (CS8);
+
+	// Local flags
+	// -----------
+	// ECHO: Disables echoing of input characters to the terminal.
+	//       Necessary for raw input mode.
+	// ICANON: Disables canonical mode, allowing input to be read byte by byte
+	//         instead of line by line.
+	// ISIG: Disables signal generation for special characters like CTRL-C (SIGINT)
+	//       and CTRL-Z (SIGTSTP).
+	// IEXTEN: Disables implementation defined input processing (e.g., CTRL-V).
 	rt.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
 
 	rt.c_cc[VMIN] = 0;
