@@ -73,7 +73,7 @@ struct config C;
 
 void setStatusMsg(const char *fmt, ...);
 void clear();
-char *prompt(char *p);
+char *prompt(char *p, void (*callback)(char*, int));
 
 void kill(const char *s) {
 	write(STDOUT_FILENO, "\x1b[2J", 4);
@@ -230,6 +230,21 @@ int rowCxToRx(line *row, int cx) {
 	}
 
 	return rx;
+}
+
+int rowRxToCx(line *row, int rx) {
+	int curRx = 0;
+	int cx;
+	for (cx = 0; cx < row->size; cx++) {
+		if (row->chars[cx] == '\t') {
+			curRx += (JAKEL_TAB_STOP - 1) - (curRx % JAKEL_TAB_STOP);
+		}
+		curRx++;
+
+		if (curRx > rx) return cx;
+	}
+
+	return cx;
 }
 
 void updateRow(line *row) {
@@ -403,7 +418,7 @@ void openFile(char *fileName) {
 
 void save() {
 	if (C.fileName == NULL) {
-		C.fileName = prompt("Save as: %s (ESC to cancel)");
+		C.fileName = prompt("Save as: %s (ESC to cancel)", NULL);
 		if (C.fileName == NULL) {
 			setStatusMsg("Save cancel");
 			return;
@@ -435,6 +450,62 @@ void save() {
 	setStatusMsg("I/O error: %s", strerror(errno));
 }
 
+void findCallback(char *query, int key) {
+	static int lastMatch = -1;
+	static int direction = 1;
+
+	if (key == '\r' || key == '\x1b') {
+		lastMatch = -1;
+		direction = 1;
+		return;
+	} else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+		direction = 1;
+	} else if (key == ARROW_LEFT || key == ARROW_UP) {
+		direction = -1;
+	} else {
+		lastMatch = -1;
+		direction = 1;
+	}
+
+	if (lastMatch == -1) direction = 1;
+	int current = lastMatch;
+
+	int i;
+	for (i = 0; i < C.rowAmount; i++) {
+		current += direction;
+		if (current == -1) current = C.rowAmount - 1;
+		else if (current == C.rowAmount) current = 0;
+
+		line *row = &C.row[current];
+		char *match = strstr(row->render, query);
+		if (match) {
+			lastMatch = current;
+			C.cy = current;
+			C.cx = rowRxToCx(row, match - row->render);
+			C.rowOffset = C.rowAmount;
+			break;
+		}
+	}
+}
+
+void find() {
+	int savedCx = C.cx;
+	int savedCy = C.cy;
+	int savedColOffset = C.colOffset;
+	int savedRowOffset = C.rowOffset;
+
+	char *query = prompt("Find: %s (ESC/Arrows/Enter)", findCallback);
+
+	if (query) {
+		free(query);
+	} else {
+		C.cx = savedCx;
+		C.cy = savedCy;
+		C.colOffset = savedColOffset;
+		C.rowOffset = savedRowOffset;
+	}
+}
+
 struct abuf {
 	char *b;
 	int len;
@@ -455,7 +526,7 @@ void freeBuf(struct abuf *ab) {
 	free(ab->b);
 }
 
-char *prompt(char *p) {
+char *prompt(char *p, void (*callback)(char *, int)) {
 	size_t bufSize = 128;
 	char *buf = malloc(bufSize);
 
@@ -471,11 +542,13 @@ char *prompt(char *p) {
 			if (bufLen != 0) buf[--bufLen] = '\0';
 		} else if (c == '\x1b') {
 			setStatusMsg("");
+			if (callback) callback(buf, c);
 			free(buf);
 			return NULL;
 		} else if (c == '\r') {
 			if (bufLen != 0) {
 				setStatusMsg("");
+				if (callback) callback(buf, c);
 				return buf;
 			}
 		} else if (!iscntrl(c) && c < 128) {
@@ -487,6 +560,8 @@ char *prompt(char *p) {
 			buf[bufLen++] = c;
 			buf[bufLen] = '\0';
 		}
+
+		if (callback) callback(buf, c);
 	}
 }
 
@@ -559,6 +634,10 @@ void processKey() {
 			break;
 		case END:
 			if (C.cy < C.rowAmount) C.cx = C.row[C.cy].size;
+			break;
+
+		case K_CTRL('f'):
+			find();
 			break;
 
 		case BACKSPACE:
@@ -747,7 +826,7 @@ int main(int argc, char *argv[]) {
 		openFile(argv[1]);
 	}
 
-	setStatusMsg("CTRL-S(ave) | CTRL-Q(uit)");
+	setStatusMsg("CTRL-S(ave) | CTRL-Q(uit) | CTRL-F(ind)");
 
 	while (1) {
 		clear();
