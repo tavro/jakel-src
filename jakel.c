@@ -4,6 +4,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -16,10 +17,13 @@
 
 #define JAKEL_VERSION "0.0.1"
 #define JAKEL_TAB_STOP 8
+#define JAKEL_QUIT_TIMES 3
 
 #define K_CTRL(k) ((k) & 0x1f)
 
 enum keys {
+	BACKSPACE = 127,
+
 	ARROW_LEFT = 1000,
 	ARROW_RIGHT,
 	ARROW_UP,
@@ -55,7 +59,9 @@ struct config {
 	int rowAmount;
 	line *row;
 
-	char *filename; // TODO: Update name
+	int modified;
+
+	char *fileName;
 
 	char statusMsg[80];
 	time_t statusMsgTime;
@@ -64,6 +70,10 @@ struct config {
 };
 
 struct config C;
+
+void setStatusMsg(const char *fmt, ...);
+void clear();
+char *prompt(char *p);
 
 void kill(const char *s) {
 	write(STDOUT_FILENO, "\x1b[2J", 4);
@@ -246,10 +256,12 @@ void updateRow(line *row) {
 	row->rsize = idx;
 }
 
-void appendRow(char *s, size_t len) {
-	C.row = realloc(C.row, sizeof(line) * (C.rowAmount + 1));
+void insertRow(int at, char *s, size_t len) {
+	if (at < 0 || at > C.rowAmount) return;
 
-	int at = C.rowAmount;
+	C.row = realloc(C.row, sizeof(line) * (C.rowAmount + 1));
+	memmove(&C.row[at + 1], &C.row[at], sizeof(line) * (C.rowAmount - at));
+
 	C.row[at].size = len;
 	C.row[at].chars = malloc(len + 1);
 
@@ -262,14 +274,117 @@ void appendRow(char *s, size_t len) {
 	updateRow(&C.row[at]);
 
 	C.rowAmount++;
+	C.modified++;
 }
 
+void freeRow(line* row) {
+	free(row->render);
+	free(row->chars);
+}
 
-void open(char *filename) {
-	free(C.filename);
-	C.filename = strdup(filename);
+void deleteRow(int at) {
+	if (at < 0 || at >= C.rowAmount) return;
 
-	FILE *fp = fopen(filename, "r");
+	freeRow(&C.row[at]);
+	memmove(&C.row[at], &C.row[at + 1], sizeof(line) * (C.rowAmount - at - 1));
+	C.rowAmount--;
+	C.modified++;
+}
+
+void insertRowChar(line *row, int at, int c) {
+	if (at < 0 || at > row->size) at = row->size;
+
+	row->chars = realloc(row->chars, row->size + 2);
+	memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+	row->size++;
+	row->chars[at] = c;
+	updateRow(row);
+	C.modified++;
+}
+
+void insertChar(int c) {
+	if (C.cy == C.rowAmount) {
+		insertRow(C.rowAmount, "", 0);
+	}
+
+	insertRowChar(&C.row[C.cy], C.cx, c);
+	C.cx++;
+}
+
+void insertNewLine() {
+	if (C.cx == 0) {
+		insertRow(C.cy, "", 0);
+	} else {
+		line *row = &C.row[C.cy];
+		insertRow(C.cy + 1, &row->chars[C.cx], row->size - C.cx);
+		row = &C.row[C.cy];
+		row->size = C.cx;
+		row->chars[row->size] = '\0';
+		updateRow(row);
+	}
+
+	C.cy++;
+	C.cx = 0;
+}
+
+void appendRowString(line *row, char *s, size_t len) {
+	row->chars = realloc(row->chars, row->size + len + 1);
+	memcpy(&row->chars[row->size], s, len);
+	row->size += len;
+	row->chars[row->size] = '\0';
+	updateRow(row);
+	C.modified++;
+}
+
+void deleteRowChar(line* row, int at) {
+	if (at < 0 || at >= row->size) return;
+
+	memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
+	row->size--;
+	updateRow(row);
+	C.modified++;
+}
+
+void deleteChar() {
+	if (C.cy == C.rowAmount) return;
+	if (C.cx == 0 && C.cy == 0) return;
+
+	line *row = &C.row[C.cy];
+	if (C.cx > 0) {
+		deleteRowChar(row, C.cx - 1);
+		C.cx--;
+	} else {
+		C.cx = C.row[C.cy - 1].size;
+		appendRowString(&C.row[C.cy - 1], row->chars, row->size);
+		deleteRow(C.cy);
+		C.cy--;
+	}
+}
+
+char *rowsToString(int *bufLen) {
+	int totalLen = 0;
+
+	int j;
+	for (j = 0; j < C.rowAmount; j++) totalLen += C.row[j].size + 1;
+	*bufLen = totalLen;
+
+	char *buf = malloc(totalLen);
+	char *p = buf;
+	for (j = 0; j < C.rowAmount; j++) {
+		memcpy(p, C.row[j].chars, C.row[j].size);
+		p += C.row[j].size;
+		*p = '\n';
+		p++;
+	}
+
+	return buf;
+}
+
+void openFile(char *fileName) {
+	free(C.fileName);
+	C.fileName = strdup(fileName);
+
+	FILE *fp = fopen(fileName, "r");
 	if (!fp) kill("fopen");
 
 	char *l = NULL;
@@ -278,11 +393,46 @@ void open(char *filename) {
 
 	while((llen = getline(&l, &lcap, fp)) != -1) {
 		while (llen > 0 && (l[llen - 1] == '\n' || l[llen - 1] == '\r')) llen--;
-		appendRow(l, llen);
+		insertRow(C.rowAmount, l, llen);
 	}
 
 	free(l);
 	fclose(fp);
+	C.modified = 0;
+}
+
+void save() {
+	if (C.fileName == NULL) {
+		C.fileName = prompt("Save as: %s (ESC to cancel)");
+		if (C.fileName == NULL) {
+			setStatusMsg("Save cancel");
+			return;
+		}
+	}
+
+	int len;
+	char *buf = rowsToString(&len);
+
+	// O_CREAT tells the program we want to create a new file if it doesn't already exist.
+	// O_RDWR tells it we want to open it for reading and writing.
+	// 0644 is permissions you would usually want for text files.
+	int fd = open(C.fileName, O_RDWR | O_CREAT, 0644);
+
+	if (fd != -1) {
+		if (ftruncate(fd, len) != -1) {
+			if (write(fd, buf, len) == len) {
+				close(fd);
+				free(buf);
+				C.modified = 0;
+				setStatusMsg("wrote %d B", len);
+				return;
+			}
+		}
+		close(fd);
+	}
+
+	free(buf);
+	setStatusMsg("I/O error: %s", strerror(errno));
 }
 
 struct abuf {
@@ -303,6 +453,41 @@ void appendToBuf(struct abuf *ab, const char *s, int len) {
 
 void freeBuf(struct abuf *ab) {
 	free(ab->b);
+}
+
+char *prompt(char *p) {
+	size_t bufSize = 128;
+	char *buf = malloc(bufSize);
+
+	size_t bufLen = 0;
+	buf[0] = '\0';
+
+	while (1) {
+		setStatusMsg(p, buf);
+		clear();
+
+		int c = readKey();
+		if (c == DELETE || c == K_CTRL('h') || c == BACKSPACE) {
+			if (bufLen != 0) buf[--bufLen] = '\0';
+		} else if (c == '\x1b') {
+			setStatusMsg("");
+			free(buf);
+			return NULL;
+		} else if (c == '\r') {
+			if (bufLen != 0) {
+				setStatusMsg("");
+				return buf;
+			}
+		} else if (!iscntrl(c) && c < 128) {
+			if (bufLen == bufSize -1) {
+				bufSize *= 2;
+				buf = realloc(buf, bufSize);
+			}
+
+			buf[bufLen++] = c;
+			buf[bufLen] = '\0';
+		}
+	}
 }
 
 void moveCursor(int c) {
@@ -345,13 +530,28 @@ void moveCursor(int c) {
 }
 
 void processKey() {
+	static int quitTimes = JAKEL_QUIT_TIMES;
+
 	int c = readKey();
 
 	switch (c) {
+		case '\r':
+			insertNewLine();
+			break;
+
 		case K_CTRL('q'):
+			if (C.modified && quitTimes > 0) {
+				setStatusMsg("UNSAVED FILE: Press CTRL-Q %d times to quit.", quitTimes);
+				quitTimes--;
+				return;
+			}
 			write(STDOUT_FILENO, "\x1b[2J", 4);
         		write(STDOUT_FILENO, "\x1b[H", 3);
 			exit(0);
+			break;
+
+		case K_CTRL('s'):
+			save();
 			break;
 
 		case HOME:
@@ -359,6 +559,13 @@ void processKey() {
 			break;
 		case END:
 			if (C.cy < C.rowAmount) C.cx = C.row[C.cy].size;
+			break;
+
+		case BACKSPACE:
+		case K_CTRL('h'):
+		case DELETE:
+			if (c == DELETE) moveCursor(ARROW_RIGHT);
+			deleteChar();
 			break;
 
 		case PAGE_UP:
@@ -382,7 +589,17 @@ void processKey() {
 		case ARROW_RIGHT:
 			moveCursor(c);
 			break;
+
+		case K_CTRL('l'):
+		case '\x1b':
+			break;
+
+		default:
+			insertChar(c);
+			break;
 	}
+
+	quitTimes = JAKEL_QUIT_TIMES;
 }
 
 void scroll() {
@@ -446,7 +663,7 @@ void drawStatusBar(struct abuf *ab) {
 	appendToBuf(ab, "\x1b[7m", 4);
 
 	char status[80], rstatus[80];
-	int len = snprintf(status, sizeof(status), "%.20s - %d lines", C.filename ? C.filename : "[Unnamed]", C.rowAmount);
+	int len = snprintf(status, sizeof(status), "%.20s - %d lines %s", C.fileName ? C.fileName : "[Unnamed]", C.rowAmount, C.modified ? "(M)" : "");
 	int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", C.cy + 1, C.rowAmount);
 
 	if (len > C.cols) len = C.cols;
@@ -512,7 +729,8 @@ void init() {
 	C.colOffset = 0;
 	C.rowAmount = 0;
 	C.row = NULL;
-	C.filename = NULL;
+	C.modified = 0;
+	C.fileName = NULL;
 	C.statusMsg[0] = '\0';
 	C.statusMsgTime = 0;
 
@@ -526,10 +744,10 @@ int main(int argc, char *argv[]) {
 	init();
 
 	if (argc >= 2) {
-		open(argv[1]);
+		openFile(argv[1]);
 	}
 
-	setStatusMsg("CTRL-Q = quit");
+	setStatusMsg("CTRL-S(ave) | CTRL-Q(uit)");
 
 	while (1) {
 		clear();
